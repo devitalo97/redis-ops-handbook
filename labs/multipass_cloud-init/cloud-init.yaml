@@ -1,0 +1,51 @@
+#cloud-config
+package_update: true
+packages:
+  - redis-server
+
+runcmd:
+  # --- 1. MEMÓRIA SWAP (Infraestrutura) ---
+  # Cria um swapfile de 1GB para atuar como "rede de segurança" contra OOM Killer.
+  # Essencial para Redis em Cloud, onde o particionamento de disco é fixo.
+  - |
+    if [ ! -f /swap.img ]; then
+      fallocate -l 1G /swap.img
+      chmod 600 /swap.img        # Segurança: Apenas root pode ler a memória em disco
+      mkswap /swap.img
+      swapon /swap.img
+      if ! grep -q "/swap.img" /etc/fstab; then
+        echo '/swap.img none swap sw 0 0' >> /etc/fstab
+      fi
+    fi
+
+  # --- 2. TUNING DE KERNEL (Sistema Operacional) ---
+  
+  # vm.overcommit_memory = 1:
+  # Obrigatorio. Permite que o Redis execute 'fork' para salvar dados (BGSAVE)
+  # mesmo que o Linux ache que tem pouca RAM livre.
+  - echo "vm.overcommit_memory=1" | tee -a /etc/sysctl.conf
+  - sysctl -p
+
+  # Transparent Huge Pages (THP):
+  # Desativamos pois causa latência e alto consumo de memória no Redis.
+  # (Nota: Em produção real, persistir isso via systemd ou rc.local)
+  - echo never > /sys/kernel/mm/transparent_hugepage/enabled
+
+  # --- 3. CONFIGURAÇÃO DO REDIS (Aplicação) ---
+  
+  # Daemonize: Alteramos para 'no' para que o systemd gerencie o processo corretamente.
+  - sed -i "s/^daemonize yes/daemonize no/" /etc/redis/redis.conf
+  
+  # Rede: Libera acesso para conexões fora da VM (Cuidado em Produção!)
+  # Se quiser travar apenas local, remova a linha abaixo.
+  - sed -i "s/^bind 127.0.0.1.*/bind 0.0.0.0/" /etc/redis/redis.conf
+  
+  # Limites de Memória:
+  # Teto de 1GB (50% da RAM da VM) para garantir espaço para o Sistema e Snapshots.
+  # Política allkeys-lru: Evita erros de escrita ao atingir o topo, removendo dados antigos.
+  - echo "maxmemory 1gb" >> /etc/redis/redis.conf
+  - echo "maxmemory-policy allkeys-lru" >> /etc/redis/redis.conf
+  
+  # --- 4. REINICIA O SERVIÇO ---
+  
+  - systemctl restart redis-server
